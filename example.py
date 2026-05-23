@@ -2,8 +2,13 @@ import json
 from ai_coscientist import AIScientistFramework
 
 ai_coscientist = AIScientistFramework(
-    model_name="gemini/gemini-2.0-flash",  # Or "gemini/gemini-2.0-flash" if you have access
-    max_iterations=2,  # Reduced iterations for example run
+    model_name="deepseek/deepseek-v4-pro",
+    # Other model examples:
+    # model_name="anthropic/mimo-v2.5-pro",
+    # llm_base_url="https://token-plan-cn.xiaomimimo.com/anthropic",
+    # llm_api_key="tp-...",
+    # llm_extra_headers={"api-key": "tp-..."},
+    max_iterations=1,  # Reduced iterations for example run
     verbose=False,  # Set to True for detailed logs
     hypotheses_per_generation=10,
     tournament_size=8,

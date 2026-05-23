@@ -81,7 +81,57 @@ Create a `.env` file with your API keys:
 ```bash
 OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
-GOOGLE_API_KEY=your_google_key_here
+GEMINI_API_KEY=your_gemini_key_here
+DEEPSEEK_API_KEY=your_deepseek_key_here
+```
+
+### Supported model providers
+
+AI-CoScientist routes models through `swarms.Agent` and LiteLLM, so any LiteLLM provider prefix works:
+
+| Provider | `model_name` example | Env var |
+|---|---|---|
+| OpenAI | `gpt-4.1`, `openai/gpt-5` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4` | `ANTHROPIC_API_KEY` |
+| Gemini | `gemini/gemini-2.0-flash` | `GEMINI_API_KEY` |
+| DeepSeek | `deepseek/deepseek-v4-pro` | `DEEPSEEK_API_KEY` |
+
+For OpenAI- or Anthropic-compatible proxies, such as one-api, new-api, or litellm-proxy:
+
+```python
+AIScientistFramework(
+    model_name="anthropic/mimo-v2.5-pro",
+    llm_base_url="https://your-proxy.example.com/anthropic",
+    llm_api_key="sk-...",
+)
+```
+
+Notes for third-party APIs:
+
+- Always include a LiteLLM provider prefix in `model_name`. Use
+  `openai/...` for OpenAI-compatible endpoints and `anthropic/...` for
+  Anthropic-compatible endpoints.
+- Match the provider prefix to the endpoint protocol. For example,
+  `model_name="anthropic/mimo-v2.5-pro"` should use an Anthropic
+  endpoint, while `model_name="openai/mimo-v2.5-pro"` should use an
+  OpenAI-compatible `/v1` endpoint.
+- `llm_base_url` is the provider base URL. Anthropic-compatible
+  clients append `/v1/messages` internally, so a base URL ending in
+  `/anthropic` may still call `/anthropic/v1/messages`.
+- Some proxies require provider-specific auth headers. Mimo's
+  Anthropic-compatible endpoint uses `api-key`, so pass it with
+  `llm_extra_headers`.
+- `LLM_BASE_URL` and `LLM_API_KEY` in `.env` are not read
+  automatically; pass them explicitly or load them with `os.getenv()`
+  in your application code.
+
+```python
+AIScientistFramework(
+    model_name="anthropic/mimo-v2.5-pro",
+    llm_base_url="https://token-plan-cn.xiaomimimo.com/anthropic",
+    llm_api_key="tp-...",
+    llm_extra_headers={"api-key": "tp-..."},
+)
 ```
 
 

@@ -243,6 +243,9 @@ class AIScientistFramework:
         tournament_size (int): Number of hypotheses to include in each tournament round.
         hypotheses_per_generation (int): Number of hypotheses to generate initially.
         evolution_top_k (int): Number of top hypotheses to evolve in each iteration.
+        llm_base_url (Optional[str]): Base URL for a compatible LLM proxy.
+        llm_api_key (Optional[str]): API key for a compatible LLM proxy.
+        llm_extra_headers (Optional[Dict[str, str]]): Extra headers for LLM calls.
     """
 
     def __init__(
@@ -254,8 +257,11 @@ class AIScientistFramework:
         tournament_size: int = 8,
         hypotheses_per_generation: int = 10,
         evolution_top_k: int = 3,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
+        llm_extra_headers: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Initialize the AIScientistFramework system with configuration parameters."""
+        """Initialize the AIScientistFramework system."""
         # Type validation
         if not isinstance(model_name, str):
             raise TypeError(
@@ -279,6 +285,11 @@ class AIScientistFramework:
         )
         self.base_path.mkdir(exist_ok=True, parents=True)
         self.verbose: bool = verbose
+        self.llm_base_url: Optional[str] = llm_base_url
+        self.llm_api_key: Optional[str] = llm_api_key
+        self.llm_extra_headers: Optional[Dict[str, str]] = (
+            llm_extra_headers
+        )
         self.conversation: Conversation = Conversation()
         self.hypotheses: List[Hypothesis] = []
 
@@ -304,90 +315,98 @@ class AIScientistFramework:
         self._init_agents()
         logger.info(
             f"AIScientistFramework initialized with model: {model_name}"
+            + (
+                f", llm_base_url: {llm_base_url}"
+                if llm_base_url
+                else ""
+            )
         )
+
+    def _agent_kwargs(
+        self, name: str, prompt: str, state_file: str
+    ) -> Dict[str, Any]:
+        """Build shared keyword arguments for a swarms.Agent."""
+        kwargs: Dict[str, Any] = {
+            "agent_name": name,
+            "system_prompt": prompt,
+            "model_name": self.model_name,
+            "max_loops": 1,
+            "saved_state_path": str(self.base_path / state_file),
+            "verbose": self.verbose,
+        }
+        if self.llm_base_url:
+            kwargs["llm_base_url"] = self.llm_base_url
+        if self.llm_api_key:
+            kwargs["llm_api_key"] = self.llm_api_key
+        llm_args: Dict[str, str] = {}
+        if self.llm_base_url:
+            llm_args["base_url"] = self.llm_base_url
+        if self.llm_api_key:
+            llm_args["api_key"] = self.llm_api_key
+        if self.llm_extra_headers:
+            llm_args["extra_headers"] = self.llm_extra_headers
+        if llm_args:
+            kwargs["llm_args"] = llm_args
+        return kwargs
 
     def _init_agents(self) -> None:
         """Initialize all specialized agents with their roles and prompts."""
         try:
             self.generation_agent: Agent = Agent(
-                agent_name="HypothesisGenerator",
-                system_prompt=self._get_generation_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "generation_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "HypothesisGenerator",
+                    self._get_generation_agent_prompt(),
+                    "generation_agent_state.json",
+                )
             )
             self.reflection_agent: Agent = Agent(
-                agent_name="HypothesisReflector",
-                system_prompt=self._get_reflection_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "reflection_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "HypothesisReflector",
+                    self._get_reflection_agent_prompt(),
+                    "reflection_agent_state.json",
+                )
             )
             self.ranking_agent: Agent = Agent(
-                agent_name="HypothesisRanker",
-                system_prompt=self._get_ranking_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "ranking_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "HypothesisRanker",
+                    self._get_ranking_agent_prompt(),
+                    "ranking_agent_state.json",
+                )
             )
             self.evolution_agent: Agent = Agent(
-                agent_name="HypothesisEvolver",
-                system_prompt=self._get_evolution_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "evolution_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "HypothesisEvolver",
+                    self._get_evolution_agent_prompt(),
+                    "evolution_agent_state.json",
+                )
             )
             self.meta_review_agent: Agent = Agent(
-                agent_name="MetaReviewer",
-                system_prompt=self._get_meta_review_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "meta_review_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "MetaReviewer",
+                    self._get_meta_review_agent_prompt(),
+                    "meta_review_agent_state.json",
+                )
             )
             self.proximity_agent: Agent = Agent(
-                agent_name="ProximityAnalyzer",
-                system_prompt=self._get_proximity_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "proximity_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "ProximityAnalyzer",
+                    self._get_proximity_agent_prompt(),
+                    "proximity_agent_state.json",
+                )
             )
             self.tournament_agent: Agent = Agent(
-                agent_name="TournamentJudge",
-                system_prompt=self._get_tournament_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "tournament_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "TournamentJudge",
+                    self._get_tournament_agent_prompt(),
+                    "tournament_agent_state.json",
+                )
             )
             self.supervisor_agent: Agent = Agent(
-                agent_name="Supervisor",
-                system_prompt=self._get_supervisor_agent_prompt(),
-                model_name=self.model_name,
-                max_loops=1,
-                saved_state_path=str(
-                    self.base_path / "supervisor_agent_state.json"
-                ),
-                verbose=self.verbose,
+                **self._agent_kwargs(
+                    "Supervisor",
+                    self._get_supervisor_agent_prompt(),
+                    "supervisor_agent_state.json",
+                )
             )
             logger.success("All agents initialized successfully")
         except Exception as e:
@@ -897,16 +916,27 @@ Example JSON Output:
                 "error": f"Unexpected JSON parse error: {exc}",
             }
 
-        # Technique 1 – partial decode using JSONDecoder.raw_decode (handles extra data)
+        # Technique 1 - scan for JSON objects and return the one that
+        # ends latest. Some Agent outputs include prior memory before
+        # the current response.
         try:
             decoder = json.JSONDecoder()
-            obj, _ = decoder.raw_decode(
-                json_str
-            )  # Ignore the remainder of the string
-            logger.debug(
-                "Successfully parsed JSON using raw_decode (partial)"
-            )
-            return obj if isinstance(obj, dict) else {"content": obj}
+            parsed_objects = []
+            for idx, char in enumerate(json_str):
+                if char != "{":
+                    continue
+                try:
+                    obj, end_idx = decoder.raw_decode(json_str[idx:])
+                except Exception:
+                    continue
+                parsed_objects.append((idx + end_idx, obj))
+
+            if parsed_objects:
+                _, obj = max(parsed_objects, key=lambda item: item[0])
+                logger.debug(
+                    "Successfully parsed JSON object from mixed content"
+                )
+                return obj if isinstance(obj, dict) else {"content": obj}
         except Exception:
             pass  # Fallthrough to regex extraction
 
@@ -1267,6 +1297,11 @@ Example JSON Output:
         logger.info(
             f"Starting ranking phase for {len(reviewed_hypotheses)} hypotheses"
         )
+        if len(reviewed_hypotheses) == 1:
+            logger.info(
+                "Only one hypothesis provided for ranking; skipping ranking agent"
+            )
+            return reviewed_hypotheses
 
         ranking_input = [
             {"text": h.text, "overall_score": h.score}
@@ -1835,11 +1870,17 @@ Example JSON Output:
                 top_hypotheses_for_evolution = self.hypotheses[
                     : min(self.evolution_top_k, len(self.hypotheses))
                 ]  # Evolve top k
+                remaining_hypotheses = self.hypotheses[
+                    len(top_hypotheses_for_evolution) :
+                ]
                 logger.debug(
                     f"Evolving top {len(top_hypotheses_for_evolution)} hypotheses"
                 )
-                self.hypotheses = self._run_evolution_phase(
+                evolved_hypotheses = self._run_evolution_phase(
                     top_hypotheses_for_evolution, meta_review_data
+                )
+                self.hypotheses = (
+                    evolved_hypotheses + remaining_hypotheses
                 )
 
                 # Re-run Reflection and Ranking on evolved hypotheses

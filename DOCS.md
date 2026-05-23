@@ -89,7 +89,41 @@ Create a `.env` file with your API keys:
 ```bash
 OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
-GOOGLE_API_KEY=your_google_key_here
+GEMINI_API_KEY=your_gemini_key_here
+DEEPSEEK_API_KEY=your_deepseek_key_here
+```
+
+### Supported Model Providers
+
+AI-CoScientist routes models through `swarms.Agent` and LiteLLM, so any LiteLLM provider prefix works:
+
+| Provider | `model_name` example | Env var |
+|---|---|---|
+| OpenAI | `gpt-4.1`, `openai/gpt-5` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4` | `ANTHROPIC_API_KEY` |
+| Gemini | `gemini/gemini-2.0-flash` | `GEMINI_API_KEY` |
+| DeepSeek | `deepseek/deepseek-v4-pro` | `DEEPSEEK_API_KEY` |
+
+For OpenAI- or Anthropic-compatible proxies, such as one-api, new-api, or litellm-proxy:
+
+```python
+AIScientistFramework(
+    model_name="openai/deepseek-v4-pro",
+    llm_base_url="https://your-proxy.example.com/v1",
+    llm_api_key="sk-...",
+)
+```
+
+Some proxies use provider-specific auth headers. For example, Mimo's
+Anthropic-compatible endpoint uses `api-key`:
+
+```python
+AIScientistFramework(
+    model_name="anthropic/mimo-v2.5-pro",
+    llm_base_url="https://token-plan-cn.xiaomimimo.com/anthropic",
+    llm_api_key="tp-...",
+    llm_extra_headers={"api-key": "tp-..."},
+)
 ```
 
 ## Quick Start
@@ -144,7 +178,10 @@ AIScientistFramework(
     verbose: bool = False,
     tournament_size: int = 8,
     hypotheses_per_generation: int = 10,
-    evolution_top_k: int = 3
+    evolution_top_k: int = 3,
+    llm_base_url: Optional[str] = None,
+    llm_api_key: Optional[str] = None,
+    llm_extra_headers: Optional[Dict[str, str]] = None
 )
 ```
 
@@ -156,6 +193,9 @@ AIScientistFramework(
 - `tournament_size`: Number of hypotheses per tournament round
 - `hypotheses_per_generation`: Initial hypothesis count
 - `evolution_top_k`: Top hypotheses to evolve each iteration
+- `llm_base_url`: Optional base URL for an OpenAI- or Anthropic-compatible proxy
+- `llm_api_key`: Optional API key for the configured proxy
+- `llm_extra_headers`: Optional extra headers for LLM requests
 
 #### Methods
 
@@ -294,7 +334,8 @@ Orchestrates workflow through:
 # LLM Provider APIs
 OPENAI_API_KEY=your_key
 ANTHROPIC_API_KEY=your_key
-GOOGLE_API_KEY=your_key
+GEMINI_API_KEY=your_key
+DEEPSEEK_API_KEY=your_key
 
 # Logging Configuration
 LOG_LEVEL=INFO
