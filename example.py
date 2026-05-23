@@ -1,4 +1,5 @@
 import json
+import os
 from ai_coscientist import AIScientistFramework
 
 ai_coscientist = AIScientistFramework(
@@ -9,14 +10,19 @@ ai_coscientist = AIScientistFramework(
     # llm_api_key="tp-...",
     # llm_extra_headers={"api-key": "tp-..."},
     max_iterations=1,  # Reduced iterations for example run
-    verbose=False,  # Set to True for detailed logs
-    hypotheses_per_generation=10,
-    tournament_size=8,
-    evolution_top_k=3,
+    verbose=True,  # Set to True for detailed logs
+    hypotheses_per_generation=3,
+    tournament_size=2,
+    evolution_top_k=1,
+    llm_max_tokens=8192,
+    llm_context_length=64000,
+    enable_literature_search=True,
+    literature_top_n=6,
+    openalex_email=os.getenv("OPENALEX_EMAIL"),
 )
 
 # Define a research goal
-research_goal = "Develop novel hypotheses for Incentivizing Reasoning Capability in LLMs via Reinforcement Learning"
+research_goal = "Propose a hypothesis of a transcriptional regulatory network that simultaneously regulates cannabis glandular trichome development and cannabinoid synthesis pathways"
 
 # Run the research workflow
 results = ai_coscientist.run_research_workflow(research_goal)

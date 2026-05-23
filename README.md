@@ -16,6 +16,7 @@ A multi-agent AI framework for collaborative scientific research, implementing t
 📈 **Execution Metrics**: Detailed performance tracking and agent timing analytics  
 💾 **State Persistence**: Save and resume research workflows with agent state management  
 🛡️ **Robust Error Handling**: Graceful fallbacks and recovery mechanisms for production reliability
+📚 **Optional Literature Grounding**: OpenAlex semantic search context for generation and review with DOI tracking
 
 ## Architecture
 
@@ -83,6 +84,7 @@ OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
 GEMINI_API_KEY=your_gemini_key_here
 DEEPSEEK_API_KEY=your_deepseek_key_here
+OPENALEX_EMAIL=your_email@example.com
 ```
 
 ### Supported model providers
@@ -164,6 +166,57 @@ for i, hypothesis in enumerate(results['top_ranked_hypotheses'], 1):
     print(f"   Win Rate: {hypothesis['win_rate']}%")
 ```
 
+### Literature Search
+
+AI-CoScientist can optionally ground generation and reflection with OpenAlex
+semantic search. It is disabled by default to keep the base workflow unchanged.
+
+```python
+import os
+from ai_coscientist import AIScientistFramework
+
+ai_coscientist = AIScientistFramework(
+    model_name="gpt-4o-mini",
+    enable_literature_search=True,
+    literature_top_n=10,
+    llm_max_tokens=8192,
+    llm_context_length=64000,
+    openalex_email=os.getenv("OPENALEX_EMAIL"),
+)
+```
+
+When enabled, the framework retrieves OpenAlex papers for the research goal and
+for each hypothesis review. Results are passed to the generation and reflection
+agents as `title`, `abstract`, and `doi`, and final hypotheses include
+`justification` and `citations` fields.
+
+OpenAlex semantic search limits used by this integration:
+
+- Query text is trimmed to 2000 characters before each request.
+- `literature_top_n` is capped at 50 papers per query.
+- Requests are limited to 1 request per second.
+- Provide `OPENALEX_EMAIL` to use the OpenAlex polite pool. Current free usage
+  is expected to be about 1000 papers per day for this workflow.
+
+Model and literature sizing affect cost, latency, and JSON reliability:
+
+- `llm_max_tokens` controls the maximum size of each agent response. The
+  default is `8192`, which gives the reflection agent enough room to return
+  review JSON with scores and detailed feedback. Higher values can reduce
+  truncation but may be capped by the provider and can increase completion
+  cost.
+- `llm_context_length` is passed to `swarms.Agent` as the context window hint.
+  The default is `64000`, which reduces unnecessary context compression when
+  literature context is enabled. It does not increase output length; use
+  `llm_max_tokens` for that.
+- `literature_top_n` controls papers fetched for the research goal and each
+  hypothesis review. Larger values add more grounding evidence but increase
+  prompt tokens, OpenAlex requests, LLM latency, and the chance of context
+  compression.
+- `debug_failed_responses=False` by default. Set it to `True` to write failed
+  reflection responses under `base_path` for diagnosing truncated or malformed
+  JSON.
+
 ---
 
 ## Architecture
@@ -192,6 +245,9 @@ ai_coscientist = AIScientistFramework(
     tournament_size=12,
     hypotheses_per_generation=15,
     evolution_top_k=5,
+    llm_max_tokens=8192,
+    llm_context_length=64000,
+    enable_literature_search=False,
 )
 ```
 
@@ -281,7 +337,7 @@ If you use this work in your research, please cite both the original paper and t
 - [ ] **Improve Elo rating**: Enhance tournament selection algorithm and rating calculations
 - [ ] **Implement hypothesis validation**: Add automated testing framework for hypothesis quality
 - [ ] **Enhance agent prompts**: Optimize system prompts for better scientific reasoning
-- [ ] **Add literature integration**: Connect with arXiv/PubMed APIs for knowledge grounding
+- [x] **Add literature integration**: Connect with OpenAlex semantic search for knowledge grounding
 - [ ] **Performance optimization**: Implement parallel agent execution and caching
 - [ ] **Add visualization**: Create hypothesis evolution and tournament bracket visualizations
 - [ ] **Extend model support**: Add support for more LLM providers and local models

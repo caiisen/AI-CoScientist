@@ -5,6 +5,7 @@ Implements hypothesis generation, review, ranking, and evolution using a tournam
 """
 
 import json
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from dotenv import load_dotenv
 from swarms import Agent
 from swarms.structs.conversation import Conversation
 from loguru import logger
+
+from ai_coscientist.literature import LiteratureService
 
 load_dotenv()
 
@@ -165,6 +168,8 @@ class Hypothesis:
     """
 
     text: str
+    justification: str = ""
+    citations: List[str] = field(default_factory=list)
     elo_rating: int = 1200
     reviews: List[HypothesisReview] = field(default_factory=list)
     score: float = 0.0
@@ -211,6 +216,8 @@ class Hypothesis:
         """Convert the hypothesis to a dictionary representation."""
         return {
             "text": self.text,
+            "justification": self.justification,
+            "citations": self.citations,
             "elo_rating": self.elo_rating,
             "score": self.score,
             "reviews": self.reviews,
@@ -246,6 +253,12 @@ class AIScientistFramework:
         llm_base_url (Optional[str]): Base URL for a compatible LLM proxy.
         llm_api_key (Optional[str]): API key for a compatible LLM proxy.
         llm_extra_headers (Optional[Dict[str, str]]): Extra headers for LLM calls.
+        llm_max_tokens (int): Maximum tokens to request for each agent output.
+        llm_context_length (Optional[int]): Agent context window hint for swarms.
+        enable_literature_search (bool): Enable OpenAlex literature context.
+        literature_top_n (int): Number of papers to retrieve per query, max 50.
+        openalex_email (Optional[str]): Email for OpenAlex polite pool.
+        debug_failed_responses (bool): Persist failed reflection responses for debugging.
     """
 
     def __init__(
@@ -260,6 +273,12 @@ class AIScientistFramework:
         llm_base_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
         llm_extra_headers: Optional[Dict[str, str]] = None,
+        llm_max_tokens: int = 8192,
+        llm_context_length: Optional[int] = 64000,
+        enable_literature_search: bool = False,
+        literature_top_n: int = 10,
+        openalex_email: Optional[str] = None,
+        debug_failed_responses: bool = False,
     ) -> None:
         """Initialize the AIScientistFramework system."""
         # Type validation
@@ -274,6 +293,36 @@ class AIScientistFramework:
         if not isinstance(verbose, bool):
             raise TypeError(
                 f"verbose must be bool, got {type(verbose)}"
+            )
+        if not isinstance(enable_literature_search, bool):
+            raise TypeError(
+                "enable_literature_search must be bool, got "
+                f"{type(enable_literature_search)}"
+            )
+        if not isinstance(literature_top_n, int) or literature_top_n < 1:
+            raise ValueError(
+                "literature_top_n must be positive int, got "
+                f"{literature_top_n}"
+            )
+        if not isinstance(llm_max_tokens, int) or llm_max_tokens < 1:
+            raise ValueError(
+                f"llm_max_tokens must be positive int, got {llm_max_tokens}"
+            )
+        if (
+            llm_context_length is not None
+            and (
+                not isinstance(llm_context_length, int)
+                or llm_context_length < 1
+            )
+        ):
+            raise ValueError(
+                "llm_context_length must be a positive int or None, got "
+                f"{llm_context_length}"
+            )
+        if not isinstance(debug_failed_responses, bool):
+            raise TypeError(
+                "debug_failed_responses must be bool, got "
+                f"{type(debug_failed_responses)}"
             )
 
         self.model_name: str = model_name
@@ -290,6 +339,22 @@ class AIScientistFramework:
         self.llm_extra_headers: Optional[Dict[str, str]] = (
             llm_extra_headers
         )
+        self.llm_max_tokens: int = llm_max_tokens
+        self.llm_context_length: Optional[int] = llm_context_length
+        self.debug_failed_responses: bool = debug_failed_responses
+        self._warned_context_length_override: bool = False
+        self.enable_literature_search = enable_literature_search
+        self._goal_literature: List[Dict[str, str]] = []
+        self.literature_service: Optional[LiteratureService] = None
+        if enable_literature_search:
+            self.literature_service = LiteratureService(
+                top_n=literature_top_n,
+                mailto=openalex_email or os.getenv("OPENALEX_EMAIL"),
+            )
+            logger.info(
+                "Literature search enabled "
+                f"(top_n={self.literature_service.top_n})"
+            )
         self.conversation: Conversation = Conversation()
         self.hypotheses: List[Hypothesis] = []
 
@@ -333,7 +398,10 @@ class AIScientistFramework:
             "max_loops": 1,
             "saved_state_path": str(self.base_path / state_file),
             "verbose": self.verbose,
+            "max_tokens": self.llm_max_tokens,
         }
+        if self.llm_context_length is not None:
+            kwargs["context_length"] = self.llm_context_length
         if self.llm_base_url:
             kwargs["llm_base_url"] = self.llm_base_url
         if self.llm_api_key:
@@ -349,64 +417,82 @@ class AIScientistFramework:
             kwargs["llm_args"] = llm_args
         return kwargs
 
+    def _create_agent(
+        self, name: str, prompt: str, state_file: str
+    ) -> Agent:
+        """Create an Agent and enforce settings swarms may override."""
+        agent = Agent(**self._agent_kwargs(name, prompt, state_file))
+
+        if self.llm_context_length is not None:
+            actual_context_length = getattr(
+                agent, "context_length", None
+            )
+            if actual_context_length != self.llm_context_length:
+                if not self._warned_context_length_override:
+                    logger.warning(
+                        "Overriding swarms Agent context_length after "
+                        "initialization because the installed swarms version "
+                        "resets constructor context_length to "
+                        f"{actual_context_length}."
+                    )
+                    self._warned_context_length_override = True
+                agent.context_length = self.llm_context_length
+            short_memory = getattr(agent, "short_memory", None)
+            if short_memory is not None and hasattr(
+                short_memory, "context_length"
+            ):
+                short_memory.context_length = self.llm_context_length
+            logger.debug(
+                f"{name} context_length={getattr(agent, 'context_length', None)}, "
+                f"short_memory_context_length="
+                f"{getattr(short_memory, 'context_length', None)}, "
+                f"max_tokens={getattr(agent, 'max_tokens', None)}"
+            )
+
+        return agent
+
     def _init_agents(self) -> None:
         """Initialize all specialized agents with their roles and prompts."""
         try:
-            self.generation_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "HypothesisGenerator",
-                    self._get_generation_agent_prompt(),
-                    "generation_agent_state.json",
-                )
+            self.generation_agent: Agent = self._create_agent(
+                "HypothesisGenerator",
+                self._get_generation_agent_prompt(),
+                "generation_agent_state.json",
             )
-            self.reflection_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "HypothesisReflector",
-                    self._get_reflection_agent_prompt(),
-                    "reflection_agent_state.json",
-                )
+            self.reflection_agent: Agent = self._create_agent(
+                "HypothesisReflector",
+                self._get_reflection_agent_prompt(),
+                "reflection_agent_state.json",
             )
-            self.ranking_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "HypothesisRanker",
-                    self._get_ranking_agent_prompt(),
-                    "ranking_agent_state.json",
-                )
+            self.ranking_agent: Agent = self._create_agent(
+                "HypothesisRanker",
+                self._get_ranking_agent_prompt(),
+                "ranking_agent_state.json",
             )
-            self.evolution_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "HypothesisEvolver",
-                    self._get_evolution_agent_prompt(),
-                    "evolution_agent_state.json",
-                )
+            self.evolution_agent: Agent = self._create_agent(
+                "HypothesisEvolver",
+                self._get_evolution_agent_prompt(),
+                "evolution_agent_state.json",
             )
-            self.meta_review_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "MetaReviewer",
-                    self._get_meta_review_agent_prompt(),
-                    "meta_review_agent_state.json",
-                )
+            self.meta_review_agent: Agent = self._create_agent(
+                "MetaReviewer",
+                self._get_meta_review_agent_prompt(),
+                "meta_review_agent_state.json",
             )
-            self.proximity_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "ProximityAnalyzer",
-                    self._get_proximity_agent_prompt(),
-                    "proximity_agent_state.json",
-                )
+            self.proximity_agent: Agent = self._create_agent(
+                "ProximityAnalyzer",
+                self._get_proximity_agent_prompt(),
+                "proximity_agent_state.json",
             )
-            self.tournament_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "TournamentJudge",
-                    self._get_tournament_agent_prompt(),
-                    "tournament_agent_state.json",
-                )
+            self.tournament_agent: Agent = self._create_agent(
+                "TournamentJudge",
+                self._get_tournament_agent_prompt(),
+                "tournament_agent_state.json",
             )
-            self.supervisor_agent: Agent = Agent(
-                **self._agent_kwargs(
-                    "Supervisor",
-                    self._get_supervisor_agent_prompt(),
-                    "supervisor_agent_state.json",
-                )
+            self.supervisor_agent: Agent = self._create_agent(
+                "Supervisor",
+                self._get_supervisor_agent_prompt(),
+                "supervisor_agent_state.json",
             )
             logger.success("All agents initialized successfully")
         except Exception as e:
@@ -415,7 +501,7 @@ class AIScientistFramework:
 
     def _get_generation_agent_prompt(self) -> str:
         """Prompt for the Hypothesis Generation Agent."""
-        return """You are a Hypothesis Generation Agent in an AI Co-scientist framework.
+        prompt = """You are a Hypothesis Generation Agent in an AI Co-scientist framework.
 Your role is to generate novel and relevant research hypotheses based on a given research goal.
 
 Consider current scientific literature and knowledge in the domain.
@@ -451,10 +537,18 @@ Example JSON Output:
   ]
 }
 """
+        if self.enable_literature_search:
+            prompt += """
+If the input contains a non-empty `literature_context` field, treat each entry
+({title, abstract, doi}) as a real published work. Ground hypotheses in this
+evidence and cite the DOI in the justification field whenever you draw on a
+paper. If `literature_context` is empty or missing, proceed without citations.
+"""
+        return prompt
 
     def _get_reflection_agent_prompt(self) -> str:
         """Prompt for the Hypothesis Reflection Agent (Reviewer)."""
-        return """You are a Hypothesis Reflection Agent, acting as a scientific peer reviewer.
+        prompt = """You are a Hypothesis Reflection Agent, acting as a scientific peer reviewer.
 Your task is to review and critique research hypotheses for correctness, novelty, quality, and potential safety/ethical concerns.
 
 For each hypothesis, evaluate it based on the following criteria:
@@ -476,10 +570,13 @@ For the overall score, use a scale from 0.0 to 1.0, where:
 
 Output your review in JSON format:
 
+IMPORTANT: Always emit `overall_score` and `scores` as the first two keys of
+the JSON object. This keeps the review score parseable even if later feedback
+sections are truncated by provider token limits.
+
 Example JSON Output (for a single hypothesis):
 {
-  "hypothesis_text": "The hypothesis being reviewed",
-  "review_summary": "Overall summary of the review",
+  "overall_score": 0.8,
   "scores": {
     "scientific_soundness": 4,
     "novelty": 3,
@@ -488,6 +585,8 @@ Example JSON Output (for a single hypothesis):
     "clarity": 5,
     "potential_impact": 4
   },
+  "hypothesis_text": "The hypothesis being reviewed",
+  "review_summary": "Overall summary of the review",
   "safety_ethical_concerns": "Specific concerns or 'None identified'",
   "detailed_feedback": {
     "scientific_soundness": "Specific feedback on scientific soundness",
@@ -497,10 +596,17 @@ Example JSON Output (for a single hypothesis):
     "clarity": "Specific feedback on clarity",
     "potential_impact": "Specific feedback on potential impact"
   },
-  "constructive_feedback": "Specific suggestions for improvement",
-  "overall_score": 0.8
+  "constructive_feedback": "Specific suggestions for improvement"
 }
 """
+        if self.enable_literature_search:
+            prompt += """
+If the input contains a non-empty `literature_context` field, use those papers
+to validate scientific plausibility, flag conflicts with established findings,
+and detect redundancy with existing work. Cite DOIs when relevant. If
+`literature_context` is empty or missing, base your review on general knowledge.
+"""
+        return prompt
 
     def _get_ranking_agent_prompt(self) -> str:
         """Prompt for the Hypothesis Ranking Agent."""
@@ -916,6 +1022,8 @@ Example JSON Output:
                 "error": f"Unexpected JSON parse error: {exc}",
             }
 
+        is_potentially_truncated = not json_str.rstrip().endswith("}")
+
         # Technique 1 - scan for JSON objects and return the one that
         # ends latest. Some Agent outputs include prior memory before
         # the current response.
@@ -936,7 +1044,14 @@ Example JSON Output:
                 logger.debug(
                     "Successfully parsed JSON object from mixed content"
                 )
-                return obj if isinstance(obj, dict) else {"content": obj}
+                if isinstance(obj, dict):
+                    if is_potentially_truncated:
+                        obj.setdefault("_truncated", True)
+                    return obj
+                result = {"content": obj}
+                if is_potentially_truncated:
+                    result["_truncated"] = True
+                return result
         except Exception:
             pass  # Fallthrough to regex extraction
 
@@ -947,7 +1062,15 @@ Example JSON Output:
         for match in brace_pattern.finditer(json_str):
             candidate = match.group()
             try:
-                return json.loads(candidate)
+                result = json.loads(candidate)
+                if isinstance(result, dict):
+                    if is_potentially_truncated:
+                        result.setdefault("_truncated", True)
+                    return result
+                parsed_result = {"content": result}
+                if is_potentially_truncated:
+                    parsed_result["_truncated"] = True
+                return parsed_result
             except Exception:
                 continue  # Try next candidate
 
@@ -958,7 +1081,64 @@ Example JSON Output:
         return {
             "content": json_str,
             "error": "Failed to parse JSON after multiple strategies",
+            "_truncated": is_potentially_truncated,
         }
+
+    def _save_failed_response(
+        self, phase: str, index: int, response: str
+    ) -> None:
+        """Persist a failed agent response when debug capture is enabled."""
+        if not self.debug_failed_responses:
+            return
+
+        try:
+            debug_path = self.base_path / f"{phase}_failed_h{index}.txt"
+            debug_path.write_text(response, encoding="utf-8")
+            logger.debug(f"Saved failed {phase} response to {debug_path}")
+        except Exception as exc:
+            logger.warning(
+                f"Failed to save {phase} debug response for hypothesis {index}: {exc}"
+            )
+
+    @staticmethod
+    def _extract_dois(text: str) -> List[str]:
+        """Extract DOI URLs or bare DOI identifiers from agent text."""
+        if not text:
+            return []
+
+        import re
+
+        doi_pattern = re.compile(
+            r"(?:https?://(?:dx\.)?doi\.org/)?"
+            r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
+            re.IGNORECASE,
+        )
+        dois: List[str] = []
+        seen = set()
+        for match in doi_pattern.finditer(text):
+            doi = match.group(1).rstrip(".,;:)]}").lower()
+            doi_url = f"https://doi.org/{doi}"
+            if doi_url not in seen:
+                seen.add(doi_url)
+                dois.append(doi_url)
+        return dois
+
+    @staticmethod
+    def _merge_citations(*citation_groups: List[str]) -> List[str]:
+        citations: List[str] = []
+        seen = set()
+        for group in citation_groups:
+            for citation in group:
+                normalized = citation.strip()
+                if not normalized:
+                    continue
+                if normalized.lower().startswith("10."):
+                    normalized = f"https://doi.org/{normalized}"
+                key = normalized.lower()
+                if key not in seen:
+                    seen.add(key)
+                    citations.append(normalized)
+        return citations
 
     def _time_execution(
         self, agent_name: str, start_time: float
@@ -1065,6 +1245,10 @@ Example JSON Output:
                 self.hypotheses_per_generation
             ),
         }
+        if self.literature_service is not None:
+            generation_input["literature_context"] = (
+                self._goal_literature
+            )
         logger.debug(
             "Running hypothesis generation with supervisor guidance"
         )
@@ -1146,8 +1330,12 @@ Example JSON Output:
             try:
                 if isinstance(hy_data, dict) and "text" in hy_data:
                     hypothesis_text = hy_data["text"]
+                    justification = str(
+                        hy_data.get("justification", "")
+                    )
                 else:
                     hypothesis_text = str(hy_data)
+                    justification = ""
 
                 if not hypothesis_text.strip():
                     logger.warning(
@@ -1156,7 +1344,11 @@ Example JSON Output:
                     continue
 
                 hypotheses.append(
-                    Hypothesis(text=hypothesis_text.strip())
+                    Hypothesis(
+                        text=hypothesis_text.strip(),
+                        justification=justification.strip(),
+                        citations=self._extract_dois(justification),
+                    )
                 )
             except Exception as e:
                 logger.warning(
@@ -1208,7 +1400,19 @@ Example JSON Output:
                 continue
 
             try:
+                literature_context: List[Dict[str, str]] = []
+                if self.literature_service is not None:
+                    literature_context = (
+                        self.literature_service.fetch_for_hypothesis(
+                            hypothesis
+                        )
+                    )
+
                 review_input = {"hypothesis_text": hypothesis.text}
+                if self.literature_service is not None:
+                    review_input["literature_context"] = (
+                        literature_context
+                    )
                 logger.debug(
                     f"Reviewing hypothesis {i+1}/{len(hypotheses)}"
                 )
@@ -1228,6 +1432,29 @@ Example JSON Output:
                     content=review_response,
                 )
                 review_data = self._safely_parse_json(review_response)
+                response_len = len(review_response)
+                endswith_brace = review_response.rstrip().endswith("}")
+                parsed_keys = (
+                    list(review_data.keys())
+                    if isinstance(review_data, dict)
+                    else []
+                )
+
+                if (
+                    isinstance(review_data, dict)
+                    and review_data.get("_truncated")
+                ):
+                    logger.warning(
+                        f"Reflection response truncated for hypothesis {i+1}: "
+                        f"response_len={response_len}, "
+                        f"endswith_brace={endswith_brace}, "
+                        f"parsed_keys={parsed_keys}"
+                    )
+                    self._save_failed_response(
+                        "reflection", i + 1, review_response
+                    )
+                    reviewed_hypotheses.append(hypothesis)
+                    continue
 
                 if review_data and "overall_score" in review_data:
                     overall_score = review_data.get(
@@ -1240,6 +1467,14 @@ Example JSON Output:
                             hypothesis.reviews.append(
                                 review_data
                             )  # Store full review data
+                            hypothesis.citations = (
+                                self._merge_citations(
+                                    hypothesis.citations,
+                                    self._extract_dois(
+                                        json.dumps(review_data)
+                                    ),
+                                )
+                            )
                         reviewed_hypotheses.append(hypothesis)
                         logger.debug(
                             f"Successfully reviewed hypothesis {i+1} with score {overall_score}"
@@ -1252,7 +1487,14 @@ Example JSON Output:
                         reviewed_hypotheses.append(hypothesis)
                 else:
                     logger.warning(
-                        f"No valid review score found for hypothesis {i+1}: {hypothesis.text[:50]}..."
+                        f"No valid review score found for hypothesis {i+1}: "
+                        f"{hypothesis.text[:50]}... "
+                        f"response_len={response_len}, "
+                        f"endswith_brace={endswith_brace}, "
+                        f"parsed_keys={parsed_keys}"
+                    )
+                    self._save_failed_response(
+                        "reflection", i + 1, review_response
                     )
                     reviewed_hypotheses.append(
                         hypothesis
@@ -1834,8 +2076,20 @@ Example JSON Output:
             evolutions_count=0,
             agent_execution_times={},
         )
+        self._goal_literature = []
 
         try:
+            if self.literature_service is not None:
+                self._goal_literature = (
+                    self.literature_service.fetch_for_goal(
+                        research_goal
+                    )
+                )
+                logger.info(
+                    "Fetched "
+                    f"{len(self._goal_literature)} goal-level papers"
+                )
+
             # --- Generation Phase ---
             self.hypotheses = self._run_generation_phase(
                 research_goal

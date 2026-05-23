@@ -181,7 +181,13 @@ AIScientistFramework(
     evolution_top_k: int = 3,
     llm_base_url: Optional[str] = None,
     llm_api_key: Optional[str] = None,
-    llm_extra_headers: Optional[Dict[str, str]] = None
+    llm_extra_headers: Optional[Dict[str, str]] = None,
+    llm_max_tokens: int = 8192,
+    llm_context_length: Optional[int] = 64000,
+    enable_literature_search: bool = False,
+    literature_top_n: int = 10,
+    openalex_email: Optional[str] = None,
+    debug_failed_responses: bool = False
 )
 ```
 
@@ -196,6 +202,12 @@ AIScientistFramework(
 - `llm_base_url`: Optional base URL for an OpenAI- or Anthropic-compatible proxy
 - `llm_api_key`: Optional API key for the configured proxy
 - `llm_extra_headers`: Optional extra headers for LLM requests
+- `llm_max_tokens`: Maximum tokens requested for each agent output. Higher values reduce truncated JSON risk but increase completion cost and may be capped by the provider.
+- `llm_context_length`: Context window hint passed to `swarms.Agent`. Larger values reduce context compression pressure but do not increase output length.
+- `enable_literature_search`: Enable OpenAlex literature grounding for generation and reflection.
+- `literature_top_n`: Papers to retrieve per query, capped at 50. Larger values add evidence but increase prompt tokens, OpenAlex requests, latency, and compression pressure.
+- `openalex_email`: Email address for the OpenAlex polite pool.
+- `debug_failed_responses`: Write failed reflection responses under `base_path` for JSON truncation debugging.
 
 #### Methods
 
